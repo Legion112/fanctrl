@@ -31,7 +31,7 @@ func FindChipIn(root, name string) (*Chip, error) {
 
 	var matches []string
 	for _, entry := range entries {
-		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), "hwmon") {
+		if !strings.HasPrefix(entry.Name(), "hwmon") {
 			continue
 		}
 		chipPath := filepath.Join(root, entry.Name())

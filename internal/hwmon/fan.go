@@ -8,9 +8,22 @@ import (
 )
 
 const (
+	// The ASRock nct6683 DKMS driver uses 0/1 on pwmN_enable (not standard hwmon 1=manual, 2=auto).
 	EnableManual = 1
-	EnableAuto   = 2
+	EnableAuto   = 0
 )
+
+// ControlModeLabel formats pwmN_enable for display.
+func ControlModeLabel(enable int) string {
+	switch enable {
+	case EnableManual:
+		return "manual"
+	case EnableAuto:
+		return "auto"
+	default:
+		return fmt.Sprintf("mode=%d", enable)
+	}
+}
 
 var ErrReadOnlyPWM = fmt.Errorf("PWM controls are read-only; install the ASRock nct6683 DKMS driver (see README)")
 

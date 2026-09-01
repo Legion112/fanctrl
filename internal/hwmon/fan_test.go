@@ -56,15 +56,22 @@ func TestPWMToPercent(t *testing.T) {
 	}
 }
 
-func TestFindChipIn(t *testing.T) {
+func TestControlModeLabel(t *testing.T) {
+	if got := hwmon.ControlModeLabel(1); got != "manual" {
+		t.Fatalf("ControlModeLabel(1) = %q", got)
+	}
+	if got := hwmon.ControlModeLabel(0); got != "auto" {
+		t.Fatalf("ControlModeLabel(0) = %q", got)
+	}
+}
+
+func TestFindChipInDirectory(t *testing.T) {
 	root := t.TempDir()
 	chipDir := filepath.Join(root, "hwmon5")
 	if err := os.Mkdir(chipDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(chipDir, "name"), []byte("nct6683\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	writeFile(t, filepath.Join(chipDir, "name"), "nct6683\n")
 
 	chip, err := hwmon.FindChipIn(root, "nct6683")
 	if err != nil {
@@ -72,6 +79,27 @@ func TestFindChipIn(t *testing.T) {
 	}
 	if chip.Path != chipDir {
 		t.Fatalf("chip path = %q, want %q", chip.Path, chipDir)
+	}
+}
+
+func TestFindChipInSymlink(t *testing.T) {
+	root := t.TempDir()
+	chipDir := filepath.Join(root, "real-hwmon")
+	if err := os.Mkdir(chipDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(chipDir, "name"), "nct6683\n")
+	link := filepath.Join(root, "hwmon5")
+	if err := os.Symlink(chipDir, link); err != nil {
+		t.Fatal(err)
+	}
+
+	chip, err := hwmon.FindChipIn(root, "nct6683")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chip.Path != link {
+		t.Fatalf("chip path = %q, want symlink %q", chip.Path, link)
 	}
 }
 

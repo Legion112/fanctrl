@@ -43,11 +43,13 @@ sudo fanctl auto
 | `status` | Show chip path, temperatures, fan RPM, PWM value and percent |
 | `max` | Set all writable PWM outputs to 100% (manual mode) |
 | `set -pwm N -pct P` | Set one header to `P` percent (0–100) |
-| `auto` | Return writable PWM outputs to firmware automatic control |
+| `auto` | Return writable PWM outputs to firmware automatic control (`pwmN_enable=0`) |
 
 Use `-chip NAME` to target a different hwmon chip (default: `nct6683`).
 
 Write commands require root (`sudo`).
+
+On ASRock boards with the community `nct6683` driver, `pwmN_enable` uses `1` for manual and `0` for firmware automatic control (not the standard hwmon value `2` for auto).
 
 ## Writable PWM (ASRock DKMS driver)
 

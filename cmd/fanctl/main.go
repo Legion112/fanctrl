@@ -70,14 +70,7 @@ func runStatus(args []string) {
 	for _, f := range status.Fans {
 		mode := "-"
 		if f.Enable != nil {
-			switch *f.Enable {
-			case hwmon.EnableManual:
-				mode = "manual"
-			case hwmon.EnableAuto:
-				mode = "auto"
-			default:
-				mode = fmt.Sprintf("mode=%d", *f.Enable)
-			}
+			mode = hwmon.ControlModeLabel(*f.Enable)
 		}
 		write := "read-only"
 		if f.Writable {
