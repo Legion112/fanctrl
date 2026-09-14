@@ -31,7 +31,18 @@ window.fanctl-popover {
 window.fanctl-popover > box {
   margin: 4px;
 }
+label.fan-rpm {
+  min-width: 18ch;
+  font-feature-settings: "tnum";
+}
 "#;
+
+/// Width for "9999 RPM · manual" so 3↔4 digit RPM does not resize the popover.
+const RPM_LABEL_CHARS: i32 = 18;
+
+fn format_rpm_status(rpm: i32, mode: &str) -> String {
+    format!("{rpm:>4} RPM · {mode}")
+}
 
 #[proxy(
     interface = "org.fanctl.Control",
@@ -207,7 +218,7 @@ fn build_popover(app: &Application) -> Rc<PopoverState> {
         .title("")
         .resizable(false)
         .decorated(false)
-        .default_width(320)
+        .default_width(340)
         .build();
     window.add_css_class("fanctl-popover");
     window.set_hide_on_close(true);
@@ -350,9 +361,13 @@ fn ensure_rows(state: &PopoverState, fans: &[FanTuple]) {
         name_label.set_hexpand(true);
         name_label.add_css_class("heading");
 
-        let rpm_label = Label::new(Some("— RPM"));
+        let rpm_label = Label::new(Some(&format_rpm_status(0, "-")));
         rpm_label.add_css_class("dim-label");
-
+        rpm_label.add_css_class("fan-rpm");
+        rpm_label.set_width_chars(RPM_LABEL_CHARS);
+        rpm_label.set_halign(Align::End);
+        rpm_label.set_xalign(1.0);
+        rpm_label.set_hexpand(false);
         header.append(&name_label);
         header.append(&rpm_label);
 
@@ -461,7 +476,7 @@ fn apply_fans(state: &PopoverState, fans: &[FanTuple]) {
             format!("{name}  ({note})")
         };
         row.name_label.set_text(&title);
-        row.rpm_label.set_text(&format!("{rpm} RPM · {mode}"));
+        row.rpm_label.set_text(&format_rpm_status(*rpm, mode));
         row.scale.set_sensitive(*writable);
 
         let hw = *percent as u8;
