@@ -35,11 +35,10 @@ sudo make install
 # config only: sudo make install-config
 ```
 
-Install the top-bar GUI (autostart):
+Install the top-bar GUI (systemd user service, starts on login):
 
 ```bash
-sudo make install-gui   # finds ~/.cargo/bin even under sudo
-fanctl-gui &            # or log out/in
+sudo make install-gui   # installs binary + enables fanctl-gui.service for your user
 # all-in-one: sudo make deploy-gui
 ```
 
@@ -47,6 +46,13 @@ If `sudo` still cannot see Rust, build as your user first:
 
 ```bash
 make build-gui && sudo make install-gui
+```
+
+Service status and logs:
+
+```bash
+systemctl --user status fanctl-gui
+journalctl --user -u fanctl-gui -f
 ```
 
 ## Usage (CLI)
@@ -79,7 +85,7 @@ On ASRock boards with the community `nct6683` driver, `pwmN_enable` uses `1` for
 
 ## Top-bar GUI
 
-After `sudo make install` + `sudo make install-gui`, a fan icon appears in the GNOME top bar (StatusNotifier / AppIndicator area, same place as Cursor/Happ).
+After `sudo make install` + `sudo make install-gui`, `fanctl-gui.service` runs in your session and a fan icon appears in the GNOME top bar (StatusNotifier / AppIndicator area, same place as Cursor/Happ).
 
 1. **Left-click** the icon → slider popover opens directly (Ubuntu shows the SNI menu instead if it is non-empty, so the tray menu is empty).
 2. Drag a slider → `fanctld` writes PWM (debounced); no sudo/Polkit prompt.
@@ -94,11 +100,15 @@ flowchart LR
 
 | Piece | Role |
 |-------|------|
-| `fanctl-gui` | Tray agent + popover (Rust, GTK4/libadwaita) |
+| `fanctl-gui` | Tray agent + popover (Rust, GTK4/libadwaita); systemd **user** unit |
 | `fanctld` | System service owning `org.fanctl.Control` |
 | `/etc/fanctl/headers.yaml` | Silk-screen names for sliders |
 
-Debug without waiting for autostart: `FANCTL_GUI_SHOW=1 fanctl-gui`.
+```bash
+systemctl --user status fanctl-gui
+journalctl --user -u fanctl-gui -f
+# force-show popover once: FANCTL_GUI_SHOW=1 fanctl-gui
+```
 
 ## Named headers
 
