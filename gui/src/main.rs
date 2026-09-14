@@ -4,6 +4,8 @@ use std::rc::Rc;
 use std::sync::{mpsc, OnceLock};
 use std::time::{Duration, Instant};
 
+use gdk4_x11::{X11Display, X11Surface};
+use gtk4::gdk::{Display, Monitor};
 use gtk4::prelude::*;
 use gtk4::{
     Align, Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, Label, Orientation,
@@ -12,6 +14,7 @@ use gtk4::{
 use ksni::blocking::TrayMethods;
 use ksni::{Category, Tray};
 use log::{debug, error, info, warn};
+use x11::xlib;
 use zbus::blocking::Connection;
 use zbus::proxy;
 
@@ -545,9 +548,89 @@ fn refresh(state: &PopoverState) {
     }
 }
 
+fn monitor_at_point(display: &Display, x: i32, y: i32) -> Option<Monitor> {
+    let monitors = display.monitors();
+    let n = monitors.n_items();
+    for i in 0..n {
+        let Some(obj) = monitors.item(i) else {
+            continue;
+        };
+        let Ok(mon) = obj.downcast::<Monitor>() else {
+            continue;
+        };
+        let g = mon.geometry();
+        if x >= g.x() && x < g.x() + g.width() && y >= g.y() && y < g.y() + g.height() {
+            return Some(mon);
+        }
+    }
+    monitors
+        .item(0)
+        .and_then(|obj| obj.downcast::<Monitor>().ok())
+}
+
+fn move_window_x11(window: &ApplicationWindow, x: i32, y: i32) -> bool {
+    let Some(surface) = window.surface() else {
+        warn!("popover has no surface yet; cannot position");
+        return false;
+    };
+    let Ok(x11_surface) = surface.downcast::<X11Surface>() else {
+        debug!("popover surface is not X11; skip absolute positioning");
+        return false;
+    };
+    let display = WidgetExt::display(window);
+    let Ok(x11_display) = display.downcast::<X11Display>() else {
+        debug!("display is not X11; skip absolute positioning");
+        return false;
+    };
+    let xid = x11_surface.xid();
+    unsafe {
+        let dpy = x11_display.xdisplay();
+        xlib::XMoveWindow(dpy, xid, x, y);
+        xlib::XFlush(dpy);
+    }
+    true
+}
+
+/// Place the undecorated popover near the tray click point (top-right anchored).
+fn position_near_point(window: &ApplicationWindow, click_x: i32, click_y: i32) {
+    let width = window.width().max(1);
+    let height = window.height().max(1);
+    let display = WidgetExt::display(window);
+
+    let probe_x = if click_x <= 0 { 0 } else { click_x };
+    let probe_y = if click_y <= 0 { 0 } else { click_y };
+    let Some(monitor) = monitor_at_point(&display, probe_x, probe_y) else {
+        warn!("no monitor available for popover placement");
+        return;
+    };
+
+    let g = monitor.geometry();
+    let (anchor_x, anchor_y) = if click_x <= 0 && click_y <= 0 {
+        // Top-right under a typical top panel when Activate coords are missing.
+        (g.x() + g.width() - 8, g.y() + 32)
+    } else {
+        (click_x, click_y)
+    };
+
+    let mut win_x = anchor_x - width;
+    let mut win_y = anchor_y;
+    let max_x = (g.x() + g.width() - width).max(g.x());
+    let max_y = (g.y() + g.height() - height).max(g.y());
+    win_x = win_x.clamp(g.x(), max_x);
+    win_y = win_y.clamp(g.y(), max_y);
+
+    info!("positioning popover at ({win_x},{win_y}) from click ({click_x},{click_y}) size {width}x{height}");
+    if !move_window_x11(window, win_x, win_y) {
+        // Surface may not be ready on first map; retry once shortly.
+        let window = window.clone();
+        glib::timeout_add_local_once(Duration::from_millis(50), move || {
+            let _ = move_window_x11(&window, win_x, win_y);
+        });
+    }
+}
+
 fn show_popover(state: &PopoverState, x: i32, y: i32) {
-    let _ = (x, y);
-    info!("showing popover");
+    info!("showing popover (activate hint x={x} y={y})");
     state.suppress_focus_out.set(true);
     let suppress = Rc::clone(&state.suppress_focus_out);
     glib::timeout_add_local_once(Duration::from_millis(250), move || {
@@ -555,6 +638,12 @@ fn show_popover(state: &PopoverState, x: i32, y: i32) {
     });
     state.window.present();
     state.window.grab_focus();
+
+    let window = state.window.clone();
+    // Wait a frame so width/height are laid out before moving.
+    glib::timeout_add_local_once(Duration::from_millis(16), move || {
+        position_near_point(&window, x, y);
+    });
 }
 
 fn main() {

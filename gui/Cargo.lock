@@ -423,12 +423,14 @@ name = "fanctl-gui"
 version = "0.1.0"
 dependencies = [
  "env_logger",
+ "gdk4-x11",
  "gio",
  "glib",
  "gtk4",
  "ksni",
  "libadwaita",
  "log",
+ "x11",
  "zbus",
 ]
 
@@ -577,6 +579,32 @@ dependencies = [
  "libc",
  "pango-sys",
  "pkg-config",
+ "system-deps",
+]
+
+[[package]]
+name = "gdk4-x11"
+version = "0.9.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c3e7380a9a206b170e1b52b5f25581406db816c68f4e7140dbef89a9e5b52ac"
+dependencies = [
+ "gdk4",
+ "gdk4-x11-sys",
+ "gio",
+ "glib",
+ "libc",
+ "x11",
+]
+
+[[package]]
+name = "gdk4-x11-sys"
+version = "0.9.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "070bd50a053f90d7fdf6be1d75672ea0f97c0e5da3a10dc6d02e5defcb0db32f"
+dependencies = [
+ "gdk4-sys",
+ "glib-sys",
+ "libc",
  "system-deps",
 ]
 
@@ -1616,6 +1644,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "x11"
+version = "2.21.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "502da5464ccd04011667b11c435cb992822c2c0dbde1770c988480d312a0db2e"
+dependencies = [
+ "libc",
+ "pkg-config",
 ]
 
 [[package]]

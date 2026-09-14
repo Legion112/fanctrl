@@ -12,3 +12,5 @@ ksni = { version = "0.3", features = ["blocking"] }
 zbus = "5"
 log = "0.4"
 env_logger = "0.11"
+gdk4-x11 = { version = "0.9", features = ["xlib"] }
+x11 = "2"
