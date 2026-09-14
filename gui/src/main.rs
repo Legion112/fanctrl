@@ -1,19 +1,32 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::mpsc;
+use std::sync::{mpsc, OnceLock};
 use std::time::Duration;
 
 use gtk4::prelude::*;
 use gtk4::{
-    Align, Application, ApplicationWindow, Box as GtkBox, Button, Label, Orientation, Scale,
+    Align, Application, ApplicationWindow, Box as GtkBox, Button, CssProvider, Label, Orientation,
+    Scale, STYLE_PROVIDER_PRIORITY_APPLICATION,
 };
 use ksni::blocking::TrayMethods;
-use ksni::{Category, MenuItem, Tray};
+use ksni::{Category, Tray};
 use zbus::blocking::Connection;
 use zbus::proxy;
 
 type FanTuple = (i32, String, String, i32, i32, i32, String, bool);
+
+static DBUS_PROXY: OnceLock<ControlProxyBlocking<'static>> = OnceLock::new();
+
+const POPOVER_CSS: &str = r#"
+window.fanctl-popover {
+  border-radius: 14px;
+  background-color: alpha(@window_bg_color, 0.96);
+}
+window.fanctl-popover > box {
+  margin: 4px;
+}
+"#;
 
 #[proxy(
     interface = "org.fanctl.Control",
@@ -32,7 +45,6 @@ trait Control {
 #[derive(Debug)]
 enum TrayMsg {
     Toggle { x: i32, y: i32 },
-    Quit,
 }
 
 struct FanTray {
@@ -40,6 +52,9 @@ struct FanTray {
 }
 
 impl Tray for FanTray {
+    // Empty menu + false → Ubuntu GNOME left-click calls Activate (sliders).
+    const MENU_ON_ACTIVATE: bool = false;
+
     fn id(&self) -> String {
         "org.fanctl.Gui".into()
     }
@@ -53,7 +68,6 @@ impl Tray for FanTray {
     }
 
     fn icon_name(&self) -> String {
-        // Installed by make install-gui; falls back if theme has weather-windy.
         "fanctl-symbolic".into()
     }
 
@@ -69,28 +83,9 @@ impl Tray for FanTray {
         let _ = self.tx.send(TrayMsg::Toggle { x, y });
     }
 
-    fn menu(&self) -> Vec<MenuItem<Self>> {
-        use ksni::menu::*;
-        vec![
-            StandardItem {
-                label: "Open fan controls".into(),
-                activate: Box::new(|this: &mut Self| {
-                    let _ = this.tx.send(TrayMsg::Toggle { x: 0, y: 0 });
-                }),
-                ..Default::default()
-            }
-            .into(),
-            MenuItem::Separator,
-            StandardItem {
-                label: "Quit".into(),
-                icon_name: "application-exit".into(),
-                activate: Box::new(|this: &mut Self| {
-                    let _ = this.tx.send(TrayMsg::Quit);
-                }),
-                ..Default::default()
-            }
-            .into(),
-        ]
+    fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
+        // Non-empty menus steal left-click on Ubuntu AppIndicator.
+        Vec::new()
     }
 }
 
@@ -107,28 +102,46 @@ struct PopoverState {
     status: Label,
     rows: RefCell<HashMap<u32, FanRow>>,
     updating: Rc<Cell<bool>>,
+    /// Ignore brief focus loss right after present().
+    suppress_focus_out: Rc<Cell<bool>>,
 }
 
-fn dbus_proxy() -> Result<ControlProxyBlocking<'static>, String> {
+fn dbus_proxy() -> Result<&'static ControlProxyBlocking<'static>, String> {
+    if let Some(proxy) = DBUS_PROXY.get() {
+        return Ok(proxy);
+    }
     let conn = Connection::system().map_err(|e| format!("system bus: {e}"))?;
-    // Leak connection for 'static proxy lifetime used by UI callbacks.
     let conn = Box::leak(Box::new(conn));
-    ControlProxyBlocking::new(conn).map_err(|e| format!("proxy: {e}"))
+    let proxy = ControlProxyBlocking::new(conn).map_err(|e| format!("proxy: {e}"))?;
+    Ok(DBUS_PROXY.get_or_init(|| proxy))
 }
 
 fn fetch_fans(proxy: &ControlProxyBlocking<'_>) -> Result<Vec<FanTuple>, String> {
     proxy.get_fans().map_err(|e| format!("{e}"))
 }
 
+fn install_popover_css() {
+    let provider = CssProvider::new();
+    provider.load_from_data(POPOVER_CSS);
+    if let Some(display) = gtk4::gdk::Display::default() {
+        gtk4::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
+}
+
 fn build_popover(app: &Application) -> Rc<PopoverState> {
     let window = ApplicationWindow::builder()
         .application(app)
-        .title("Fans")
+        .title("")
         .resizable(false)
-        .decorated(true)
+        .decorated(false)
         .default_width(320)
         .build();
-    window.add_css_class("osd");
+    window.add_css_class("fanctl-popover");
+    window.set_hide_on_close(true);
 
     let root = GtkBox::new(Orientation::Vertical, 8);
     root.set_margin_top(12);
@@ -148,8 +161,10 @@ fn build_popover(app: &Application) -> Rc<PopoverState> {
     buttons.set_halign(Align::End);
     let auto_btn = Button::with_label("Auto");
     let max_btn = Button::with_label("Max");
+    let quit_btn = Button::with_label("Quit");
     buttons.append(&auto_btn);
     buttons.append(&max_btn);
+    buttons.append(&quit_btn);
     root.append(&buttons);
 
     window.set_child(Some(&root));
@@ -160,6 +175,7 @@ fn build_popover(app: &Application) -> Rc<PopoverState> {
         status,
         rows: RefCell::new(HashMap::new()),
         updating: Rc::new(Cell::new(false)),
+        suppress_focus_out: Rc::new(Cell::new(false)),
     });
 
     {
@@ -178,6 +194,12 @@ fn build_popover(app: &Application) -> Rc<PopoverState> {
                 Ok(()) => refresh(&state),
                 Err(e) => state.status.set_text(&format!("Max failed: {e}")),
             }
+        });
+    }
+    {
+        let app = app.clone();
+        quit_btn.connect_clicked(move |_| {
+            app.quit();
         });
     }
 
@@ -200,6 +222,15 @@ fn build_popover(app: &Application) -> Rc<PopoverState> {
         window.connect_close_request(move |_| {
             state.window.set_visible(false);
             glib::Propagation::Stop
+        });
+    }
+
+    {
+        let state = Rc::clone(&state);
+        window.connect_notify_local(Some("is-active"), move |win, _| {
+            if win.is_visible() && !win.is_active() && !state.suppress_focus_out.get() {
+                win.set_visible(false);
+            }
         });
     }
 
@@ -281,7 +312,6 @@ fn ensure_rows(state: &PopoverState, fans: &[FanTuple]) {
         );
     }
 
-    // Remove rows for fans that disappeared (rare).
     let stale: Vec<u32> = rows.keys().copied().filter(|k| !seen.contains(k)).collect();
     for idx in stale {
         if let Some(row) = rows.remove(&idx) {
@@ -318,7 +348,7 @@ fn apply_fans(state: &PopoverState, fans: &[FanTuple]) {
 }
 
 fn refresh(state: &PopoverState) {
-    match dbus_proxy().and_then(|p| fetch_fans(&p)) {
+    match dbus_proxy().and_then(|p| fetch_fans(p)) {
         Ok(fans) => {
             if fans.is_empty() {
                 state.status.set_text("No fans found");
@@ -335,18 +365,21 @@ fn refresh(state: &PopoverState) {
     }
 }
 
-fn position_near(window: &ApplicationWindow, x: i32, y: i32) {
-    // Best-effort: place near click; GNOME Wayland may ignore absolute moves.
-    if x > 0 && y > 0 {
-        let _ = (x, y);
-        // gtk4 ApplicationWindow has no set_position; present() is enough under Wayland.
-    }
-    window.present();
+fn show_popover(state: &PopoverState, x: i32, y: i32) {
+    let _ = (x, y); // Wayland often ignores absolute placement; Activate coords kept for future.
+    state.suppress_focus_out.set(true);
+    let suppress = Rc::clone(&state.suppress_focus_out);
+    glib::timeout_add_local_once(Duration::from_millis(250), move || {
+        suppress.set(false);
+    });
+    state.window.present();
+    state.window.grab_focus();
 }
 
 fn main() {
     let _ = gtk4::init();
     libadwaita::init().expect("libadwaita init");
+    install_popover_css();
 
     let app = Application::builder()
         .application_id("org.fanctl.Gui")
@@ -366,12 +399,9 @@ fn main() {
 
         let popover = build_popover(app);
         refresh(&popover);
-        // Keep the application alive with no visible window (tray-only).
         std::mem::forget(hold);
 
-        // Poll tray messages into the GTK main loop.
         let popover_msgs = Rc::clone(&popover);
-        let app_quit = app.clone();
         glib::timeout_add_local(Duration::from_millis(100), move || {
             while let Ok(msg) = rx.try_recv() {
                 match msg {
@@ -380,18 +410,14 @@ fn main() {
                             popover_msgs.window.set_visible(false);
                         } else {
                             refresh(&popover_msgs);
-                            position_near(&popover_msgs.window, x, y);
+                            show_popover(&popover_msgs, x, y);
                         }
-                    }
-                    TrayMsg::Quit => {
-                        app_quit.quit();
                     }
                 }
             }
             glib::ControlFlow::Continue
         });
 
-        // Refresh RPM while the popover is open.
         let popover_poll = Rc::clone(&popover);
         glib::timeout_add_local(Duration::from_secs(2), move || {
             if popover_poll.window.is_visible() {
@@ -400,10 +426,9 @@ fn main() {
             glib::ControlFlow::Continue
         });
 
-        // Allow launching without tray: show once.
         if std::env::var_os("FANCTL_GUI_SHOW").is_some() {
             refresh(&popover);
-            popover.window.present();
+            show_popover(&popover, 0, 0);
         }
     });
 

@@ -81,9 +81,9 @@ On ASRock boards with the community `nct6683` driver, `pwmN_enable` uses `1` for
 
 After `sudo make install` + `sudo make install-gui`, a fan icon appears in the GNOME top bar (StatusNotifier / AppIndicator area, same place as Cursor/Happ).
 
-1. Click the icon → popover with one slider per fan (name, RPM, 0–100%).
+1. **Left-click** the icon → slider popover opens directly (Ubuntu shows the SNI menu instead if it is non-empty, so the tray menu is empty).
 2. Drag a slider → `fanctld` writes PWM (debounced); no sudo/Polkit prompt.
-3. Use **Auto** / **Max** in the popover footer; right-click the icon for Quit.
+3. Use **Auto** / **Max** / **Quit** in the popover footer; click away or Escape to dismiss.
 
 ```mermaid
 flowchart LR
