@@ -1,0 +1,11 @@
+# ASRock X570 Creator — edit names after you match RPM to a header
+# (unplug one connector, re-run fanctl status).
+# Indexes are hwmon fanN/pwmN channels, not BIOS silk order.
+chip: nct6683
+headers:
+  1: { name: CPU_FAN1, note: "AIO radiator FAN plug" }
+  2: { name: CPU_FAN2/WP, note: "AIO PUMP 4-pin" }
+  3: { name: CHA_FAN1/WP, note: "AIO VRM plug" }
+  4: { name: CHA_FAN2/WP, note: "" }
+  5: { name: CHA_FAN3/WP, note: "" }
+  6: { name: SB_FAN1, note: "chipset" }
