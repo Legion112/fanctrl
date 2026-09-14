@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Fan Control
+Comment=Control motherboard fan speeds from the top bar
+Exec=fanctl-gui
+Icon=fanctl-symbolic
+Terminal=false
+Categories=System;Monitor;
+StartupNotify=false
+X-GNOME-Autostart-enabled=true
+NoDisplay=true

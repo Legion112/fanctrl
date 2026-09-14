@@ -1,2 +1,4 @@
 /fanctl
+/fanctld
 .idea
+gui/target/

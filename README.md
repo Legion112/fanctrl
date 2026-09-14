@@ -1,8 +1,8 @@
 # fanctl
 
-Go CLI for controlling ASRock X570 Creator pump and radiator fans via Linux hwmon (`nct6683`).
+Go CLI and root D-Bus daemon for ASRock X570 Creator pump/radiator fans via Linux hwmon (`nct6683`), plus an optional top-bar GTK GUI.
 
-Requires **Go 1.27**.
+Requires **Go 1.27**. The tray GUI also needs **Rust**, **GTK4**, and **libadwaita**.
 
 ## Prerequisites
 
@@ -24,18 +24,32 @@ sensors | sed -n '/nct6683/,/^$/p'
 ## Build
 
 ```bash
-go build -o fanctl ./cmd/fanctl
-# or: make build
+make build          # fanctl + fanctld
+make build-gui      # Rust tray agent (needs gtk4 + libadwaita)
 ```
 
-Install binary and host-wide headers config (needs root):
+Install CLI, host-wide headers, and root daemon (no password prompts for GUI/D-Bus callers):
 
 ```bash
 sudo make install
 # config only: sudo make install-config
 ```
 
-## Usage
+Install the top-bar GUI (autostart):
+
+```bash
+sudo make install-gui   # finds ~/.cargo/bin even under sudo
+fanctl-gui &            # or log out/in
+# all-in-one: sudo make deploy-gui
+```
+
+If `sudo` still cannot see Rust, build as your user first:
+
+```bash
+make build-gui && sudo make install-gui
+```
+
+## Usage (CLI)
 
 ```bash
 fanctl status
@@ -59,9 +73,32 @@ sudo fanctl auto
 
 Use `-chip NAME` to target a different hwmon chip (default: `nct6683`).
 
-Write commands require root (`sudo`).
+CLI write commands still require root (`sudo`). The GUI talks to `fanctld` (already root) over D-Bus with **no password**.
 
 On ASRock boards with the community `nct6683` driver, `pwmN_enable` uses `1` for manual and `0` for firmware automatic control (not the standard hwmon value `2` for auto).
+
+## Top-bar GUI
+
+After `sudo make install` + `sudo make install-gui`, a fan icon appears in the GNOME top bar (StatusNotifier / AppIndicator area, same place as Cursor/Happ).
+
+1. Click the icon → popover with one slider per fan (name, RPM, 0–100%).
+2. Drag a slider → `fanctld` writes PWM (debounced); no sudo/Polkit prompt.
+3. Use **Auto** / **Max** in the popover footer; right-click the icon for Quit.
+
+```mermaid
+flowchart LR
+  Icon["Top-bar icon"] -->|click| Popover["Adwaita popover"]
+  Popover -->|D-Bus| Daemon["fanctld root"]
+  Daemon --> Hwmon["hwmon PWM"]
+```
+
+| Piece | Role |
+|-------|------|
+| `fanctl-gui` | Tray agent + popover (Rust, GTK4/libadwaita) |
+| `fanctld` | System service owning `org.fanctl.Control` |
+| `/etc/fanctl/headers.yaml` | Silk-screen names for sliders |
+
+Debug without waiting for autostart: `FANCTL_GUI_SHOW=1 fanctl-gui`.
 
 ## Named headers
 
@@ -76,7 +113,8 @@ sudo make install-config
 
 2. Match channels to headers: with the PC powered, note `fanctl status` RPM, unplug **one** motherboard fan connector, run `status` again, and see which `fanN` drops to 0. Edit that index’s `name` / `note` in `/etc/fanctl/headers.yaml`.
 
-3. Config search order: `-config PATH`, then `$FANCTL_CONFIG`, then `/etc/fanctl/headers.yaml`. Missing file is fine; status still prints `fanN:`. Named `set` needs a loaded config.
+3. Config search order: `-config PATH`, then `$FANCTL_CONFIG`, then `/etc/fanctl/headers.yaml`. Missing file is fine; status still prints `fanN:`. Named `set` and the GUI need a loaded config.
+
 Example map (starting guess — verify before trusting):
 
 ```yaml

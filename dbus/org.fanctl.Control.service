@@ -1,0 +1,5 @@
+[D-BUS Service]
+Name=org.fanctl.Control
+Exec=/bin/false
+User=root
+SystemdService=fanctld.service

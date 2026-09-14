@@ -1,0 +1,14 @@
+[Unit]
+Description=fanctl PWM control daemon
+After=dbus.service
+Requires=dbus.service
+
+[Service]
+Type=dbus
+BusName=org.fanctl.Control
+ExecStart=/usr/local/bin/fanctld
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

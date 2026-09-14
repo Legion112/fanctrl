@@ -1,0 +1,12 @@
+[package]
+name = "fanctl-gui"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+gtk4 = { version = "0.9", package = "gtk4" }
+libadwaita = { version = "0.7", features = ["v1_5"] }
+glib = "0.20"
+gio = "0.20"
+ksni = { version = "0.3", features = ["blocking"] }
+zbus = "5"
