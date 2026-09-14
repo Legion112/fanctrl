@@ -49,7 +49,7 @@ func (s *Service) GetFans() ([]control.FanInfo, *dbus.Error) {
 	return fans, nil
 }
 
-// SetPercent sets one fan PWM percent (debounced in the controller).
+// SetPercent sets one fan PWM percent (applied immediately in the controller).
 func (s *Service) SetPercent(index uint32, percent byte) *dbus.Error {
 	if err := s.controller.SetPercent(index, percent); err != nil {
 		return dbus.MakeFailedError(err)

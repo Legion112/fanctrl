@@ -2,6 +2,7 @@ package control
 
 import (
 	"fmt"
+	"log"
 	"sync"
 	"time"
 
@@ -10,8 +11,7 @@ import (
 )
 
 const (
-	debounceDelay = 200 * time.Millisecond
-	defaultChip   = "nct6683"
+	defaultChip = "nct6683"
 )
 
 // FanInfo is the D-Bus-facing fan snapshot (signature fields of (issiiisb)).
@@ -34,8 +34,6 @@ type Controller struct {
 	mu       sync.Mutex
 	chip     *hwmon.Chip
 	cfg      *config.Config
-	pending  map[int]int // index -> percent
-	timers   map[int]*time.Timer
 	onChange FansHandler
 }
 
@@ -49,11 +47,10 @@ func New() (*Controller, error) {
 	if err != nil {
 		return nil, err
 	}
+	log.Printf("controller ready chip=%s path=%s headers=%v", chip.Name, chip.Path, cfg != nil && len(cfg.Headers) > 0)
 	return &Controller{
-		chip:    chip,
-		cfg:     cfg,
-		pending: make(map[int]int),
-		timers:  make(map[int]*time.Timer),
+		chip: chip,
+		cfg:  cfg,
 	}, nil
 }
 
@@ -66,6 +63,7 @@ func (c *Controller) SetChangeHandler(fn FansHandler) {
 
 // GetFans returns the current fan list with header names.
 func (c *Controller) GetFans() ([]FanInfo, error) {
+	start := time.Now()
 	c.mu.Lock()
 	chip := c.chip
 	cfg := c.cfg
@@ -73,12 +71,15 @@ func (c *Controller) GetFans() ([]FanInfo, error) {
 
 	status, err := hwmon.ReadStatus(chip)
 	if err != nil {
+		log.Printf("GetFans error after %s: %v", time.Since(start).Round(time.Millisecond), err)
 		return nil, err
 	}
-	return fansFromStatus(status, cfg), nil
+	fans := fansFromStatus(status, cfg)
+	log.Printf("GetFans ok count=%d in %s", len(fans), time.Since(start).Round(time.Millisecond))
+	return fans, nil
 }
 
-// SetPercent schedules a debounced PWM write for one fan index.
+// SetPercent writes one fan PWM percent immediately (GUI already debounces).
 func (c *Controller) SetPercent(index uint32, percent byte) error {
 	if percent > 100 {
 		return fmt.Errorf("percent must be 0-100, got %d", percent)
@@ -89,47 +90,32 @@ func (c *Controller) SetPercent(index uint32, percent byte) error {
 	}
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.pending[idx] = int(percent)
-	if t, ok := c.timers[idx]; ok {
-		t.Stop()
-	}
-	i := idx
-	c.timers[idx] = time.AfterFunc(debounceDelay, func() {
-		c.applyPending(i)
-	})
-	return nil
-}
-
-func (c *Controller) applyPending(index int) {
-	c.mu.Lock()
-	percent, ok := c.pending[index]
-	if !ok {
-		c.mu.Unlock()
-		return
-	}
-	delete(c.pending, index)
-	delete(c.timers, index)
 	chip := c.chip
 	onChange := c.onChange
 	cfg := c.cfg
 	c.mu.Unlock()
 
-	if err := hwmon.SetPWM(chip, index, percent); err != nil {
-		return
+	start := time.Now()
+	if err := hwmon.SetPWM(chip, idx, int(percent)); err != nil {
+		log.Printf("SetPercent apply fan=%d pct=%d failed after %s: %v", idx, percent, time.Since(start).Round(time.Millisecond), err)
+		return err
 	}
+	log.Printf("SetPercent apply fan=%d pct=%d ok in %s", idx, percent, time.Since(start).Round(time.Millisecond))
+
 	status, err := hwmon.ReadStatus(chip)
 	if err != nil {
-		return
+		log.Printf("SetPercent apply fan=%d: read status after write: %v", idx, err)
+		return nil
 	}
 	if onChange != nil {
 		onChange(fansFromStatus(status, cfg))
 	}
+	return nil
 }
 
 // SetMax sets all writable fans to 100%.
 func (c *Controller) SetMax() error {
+	start := time.Now()
 	c.mu.Lock()
 	chip := c.chip
 	onChange := c.onChange
@@ -137,13 +123,16 @@ func (c *Controller) SetMax() error {
 	c.mu.Unlock()
 
 	if err := hwmon.SetMax(chip); err != nil {
+		log.Printf("SetMax failed after %s: %v", time.Since(start).Round(time.Millisecond), err)
 		return err
 	}
+	log.Printf("SetMax ok in %s", time.Since(start).Round(time.Millisecond))
 	return c.emit(chip, cfg, onChange)
 }
 
 // SetAuto returns writable fans to firmware auto control.
 func (c *Controller) SetAuto() error {
+	start := time.Now()
 	c.mu.Lock()
 	chip := c.chip
 	onChange := c.onChange
@@ -151,8 +140,10 @@ func (c *Controller) SetAuto() error {
 	c.mu.Unlock()
 
 	if err := hwmon.SetAuto(chip); err != nil {
+		log.Printf("SetAuto failed after %s: %v", time.Since(start).Round(time.Millisecond), err)
 		return err
 	}
+	log.Printf("SetAuto ok in %s", time.Since(start).Round(time.Millisecond))
 	return c.emit(chip, cfg, onChange)
 }
 
@@ -165,6 +156,7 @@ func (c *Controller) ReloadConfig() error {
 	c.mu.Lock()
 	c.cfg = cfg
 	c.mu.Unlock()
+	log.Printf("ReloadConfig ok")
 	return nil
 }
 

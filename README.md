@@ -107,7 +107,11 @@ flowchart LR
 ```bash
 systemctl --user status fanctl-gui
 journalctl --user -u fanctl-gui -f
-# force-show popover once: FANCTL_GUI_SHOW=1 fanctl-gui
+journalctl -u fanctld -f
+# verbose GUI (slider / D-Bus timings):
+systemctl --user edit fanctl-gui   # add: Environment=RUST_LOG=fanctl_gui=debug
+# or one-shot:
+RUST_LOG=fanctl_gui=debug FANCTL_GUI_SHOW=1 /usr/local/bin/fanctl-gui
 ```
 
 ## Named headers
