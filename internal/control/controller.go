@@ -1,18 +1,29 @@
 package control
 
 import (
+	"errors"
 	"fmt"
 	"log"
+	"sort"
 	"sync"
 	"time"
 
 	"github.com/legion/fanctl/internal/config"
 	"github.com/legion/fanctl/internal/hwmon"
+	"github.com/legion/fanctl/internal/state"
 )
 
 const (
 	defaultChip = "nct6683"
+
+	// LowPercentWarn is the duty cycle below which restoring a fan unattended
+	// is worth a line in the journal.
+	LowPercentWarn = 20
 )
+
+// ErrNoProfile reports that nothing has been saved yet. Callers distinguish it
+// from a failure so they can say "no saved profile" instead of "restore failed".
+var ErrNoProfile = errors.New("no saved fan profile")
 
 // FanInfo is the D-Bus-facing fan snapshot (signature fields of (issiiisb)).
 type FanInfo struct {
@@ -35,6 +46,9 @@ type Controller struct {
 	chip     *hwmon.Chip
 	cfg      *config.Config
 	onChange FansHandler
+	// userTouched records that something user-initiated has happened, which
+	// closes the boot verify window so VerifySaved stops fighting the user.
+	userTouched bool
 }
 
 // New creates a controller for the default nct6683 chip and headers config.
@@ -93,6 +107,7 @@ func (c *Controller) SetPercent(index uint32, percent byte) error {
 	chip := c.chip
 	onChange := c.onChange
 	cfg := c.cfg
+	c.userTouched = true
 	c.mu.Unlock()
 
 	start := time.Now()
@@ -120,6 +135,7 @@ func (c *Controller) SetMax() error {
 	chip := c.chip
 	onChange := c.onChange
 	cfg := c.cfg
+	c.userTouched = true
 	c.mu.Unlock()
 
 	if err := hwmon.SetMax(chip); err != nil {
@@ -130,13 +146,14 @@ func (c *Controller) SetMax() error {
 	return c.emit(chip, cfg, onChange)
 }
 
-// SetAuto returns writable fans to firmware auto control.
+// SetAuto returns writable fans to firmware automatic control.
 func (c *Controller) SetAuto() error {
 	start := time.Now()
 	c.mu.Lock()
 	chip := c.chip
 	onChange := c.onChange
 	cfg := c.cfg
+	c.userTouched = true
 	c.mu.Unlock()
 
 	if err := hwmon.SetAuto(chip); err != nil {
@@ -145,6 +162,188 @@ func (c *Controller) SetAuto() error {
 	}
 	log.Printf("SetAuto ok in %s", time.Since(start).Round(time.Millisecond))
 	return c.emit(chip, cfg, onChange)
+}
+
+// SaveState snapshots the current hardware state as the profile to restore at
+// the next boot.
+func (c *Controller) SaveState() error {
+	c.mu.Lock()
+	chip := c.chip
+	c.userTouched = true
+	c.mu.Unlock()
+
+	status, err := hwmon.ReadStatus(chip)
+	if err != nil {
+		return err
+	}
+
+	profile := state.FromStatus(chip.Name, status.Fans, time.Now())
+	path := state.ResolvePath("")
+	if err := state.Save(path, profile); err != nil {
+		return err
+	}
+
+	for _, warn := range LowSpeedWarnings(profile, status.Fans) {
+		log.Printf("SaveState: %s", warn)
+	}
+	log.Printf("SaveState ok fans=%d path=%s", len(profile.Fans), path)
+	return nil
+}
+
+// RestoreState applies the saved profile and notifies subscribers.
+func (c *Controller) RestoreState() (int, error) {
+	applied, err := c.applySaved("RestoreState")
+	if err != nil {
+		return applied, err
+	}
+	c.EmitCurrent()
+	return applied, nil
+}
+
+// VerifySaved re-applies saved fans the firmware has drifted away from. It is
+// a no-op once anything user-initiated has happened, so it never fights the
+// user; fanctld only calls it during a short window after boot.
+func (c *Controller) VerifySaved() (int, error) {
+	c.mu.Lock()
+	touched := c.userTouched
+	c.mu.Unlock()
+	if touched {
+		return 0, nil
+	}
+	return c.applySaved("VerifySaved")
+}
+
+// UserTouched reports whether anything user-initiated has been seen yet.
+func (c *Controller) UserTouched() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.userTouched
+}
+
+// ApplyResult summarises one restore. Applied and Skipped are in fan index
+// order; Errs are already wrapped with the fan they came from.
+type ApplyResult struct {
+	Applied []state.Action
+	Skipped []state.Skip
+	Errs    []error
+}
+
+// ApplyProfile writes a profile to the chip. One dead or read-only header must
+// not sink the rest, so per-fan failures are collected rather than returned;
+// the caller decides how to report them. Shared by fanctld and the CLI so the
+// two cannot drift apart.
+func ApplyProfile(chip *hwmon.Chip, profile *state.Profile, fans []hwmon.Fan) ApplyResult {
+	actions, skipped := state.Plan(profile, fans)
+	res := ApplyResult{Skipped: skipped}
+
+	for _, a := range actions {
+		var err error
+		if a.Mode == state.ModeAuto {
+			err = hwmon.SetAutoIndex(chip, a.Index)
+		} else {
+			err = hwmon.SetPWMRaw(chip, a.Index, a.PWM)
+		}
+		if err != nil {
+			res.Errs = append(res.Errs, fmt.Errorf("fan%d: %w", a.Index, err))
+			continue
+		}
+		res.Applied = append(res.Applied, a)
+	}
+	return res
+}
+
+// Err reports a failure only when every attempted write failed; a partial
+// restore is still a restore.
+func (r ApplyResult) Err() error {
+	if len(r.Applied) == 0 && len(r.Errs) > 0 {
+		return errors.Join(r.Errs...)
+	}
+	return nil
+}
+
+func (c *Controller) applySaved(who string) (int, error) {
+	c.mu.Lock()
+	chip := c.chip
+	c.mu.Unlock()
+
+	profile, err := state.LoadIfPresent(state.ResolvePath(""))
+	if err != nil {
+		return 0, err
+	}
+	if profile == nil {
+		return 0, ErrNoProfile
+	}
+	if profile.Chip != "" && profile.Chip != chip.Name {
+		// A partial apply beats a hard failure in the boot path, and Plan turns
+		// indexes this board does not have into skips anyway.
+		log.Printf("%s: profile was saved for chip %q, applying against %q", who, profile.Chip, chip.Name)
+	}
+
+	status, err := hwmon.ReadStatus(chip)
+	if err != nil {
+		return 0, err
+	}
+
+	res := ApplyProfile(chip, profile, status.Fans)
+	for _, s := range res.Skipped {
+		log.Printf("%s: fan%d skipped (%s)", who, s.Index, s.Reason)
+	}
+	for _, a := range res.Applied {
+		if a.Mode == state.ModeAuto {
+			log.Printf("%s: fan%d set to firmware auto", who, a.Index)
+			continue
+		}
+		pct := hwmon.PWMToPercent(a.PWM)
+		if pct < LowPercentWarn {
+			log.Printf("%s: fan%d restored to pwm=%d (%d%%) - below %d%%, check temperatures",
+				who, a.Index, a.PWM, pct, LowPercentWarn)
+			continue
+		}
+		log.Printf("%s: fan%d restored to pwm=%d (%d%%)", who, a.Index, a.PWM, pct)
+	}
+	for _, e := range res.Errs {
+		log.Printf("%s: %v", who, e)
+	}
+
+	return len(res.Applied), res.Err()
+}
+
+// LowSpeedWarnings flags saved fans that are spinning below LowPercentWarn, so
+// a calibration that would starve a pump at every boot is visible when it is
+// saved rather than after a reboot.
+func LowSpeedWarnings(profile *state.Profile, fans []hwmon.Fan) []string {
+	if profile == nil {
+		return nil
+	}
+	rpm := make(map[int]int, len(fans))
+	for _, f := range fans {
+		rpm[f.Index] = f.RPM
+	}
+
+	var out []string
+	for _, idx := range sortedFanIndexes(profile.Fans) {
+		fs := profile.Fans[idx]
+		if fs.Mode != state.ModeManual {
+			continue
+		}
+		pct := hwmon.PWMToPercent(fs.PWM)
+		if pct >= LowPercentWarn || rpm[idx] <= 0 {
+			continue
+		}
+		out = append(out, fmt.Sprintf(
+			"fan%d saved at %d%% (%d RPM) — below %d%%, it will be applied at every boot",
+			idx, pct, rpm[idx], LowPercentWarn))
+	}
+	return out
+}
+
+func sortedFanIndexes(fans map[int]state.FanState) []int {
+	out := make([]int, 0, len(fans))
+	for idx := range fans {
+		out = append(out, idx)
+	}
+	sort.Ints(out)
+	return out
 }
 
 // ReloadConfig reloads headers.yaml from the default search path.

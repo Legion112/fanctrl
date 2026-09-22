@@ -73,6 +73,22 @@ func (s *Service) SetAuto() *dbus.Error {
 	return nil
 }
 
+// SaveState snapshots the current fan speeds as the profile restored at boot.
+func (s *Service) SaveState() *dbus.Error {
+	if err := s.controller.SaveState(); err != nil {
+		return dbus.MakeFailedError(err)
+	}
+	return nil
+}
+
+// RestoreState re-applies the saved profile now.
+func (s *Service) RestoreState() *dbus.Error {
+	if _, err := s.controller.RestoreState(); err != nil {
+		return dbus.MakeFailedError(err)
+	}
+	return nil
+}
+
 // AcquireName requests the well-known bus name.
 func AcquireName(conn *dbus.Conn) error {
 	reply, err := conn.RequestName(BusName, dbus.NameFlagDoNotQueue)

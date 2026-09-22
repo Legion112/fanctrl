@@ -25,6 +25,8 @@ static DBUS_PROXY: OnceLock<ControlProxyBlocking<'static>> = OnceLock::new();
 const UI_DEBOUNCE: Duration = Duration::from_millis(100);
 /// After a local set, ignore hardware percent until it matches or this timeout elapses.
 const LAST_SENT_GRACE: Duration = Duration::from_secs(2);
+/// How long a confirmation survives the 2s poll refresh before the default hint returns.
+const STATUS_HOLD: Duration = Duration::from_secs(4);
 
 const POPOVER_CSS: &str = r#"
 window.fanctl-popover {
@@ -59,6 +61,7 @@ trait Control {
     fn set_percent(&self, index: u32, percent: u8) -> zbus::Result<()>;
     fn set_max(&self) -> zbus::Result<()>;
     fn set_auto(&self) -> zbus::Result<()>;
+    fn save_state(&self) -> zbus::Result<()>;
 }
 
 #[derive(Debug)]
@@ -125,6 +128,28 @@ struct PopoverState {
     rows: RefCell<HashMap<u32, FanRow>>,
     updating: Rc<Cell<bool>>,
     suppress_focus_out: Rc<Cell<bool>>,
+    /// Keeps a confirmation on screen; without it the 2s poll wipes it.
+    status_hold_until: Cell<Option<Instant>>,
+}
+
+impl PopoverState {
+    /// Show a message and protect it from the next few refreshes.
+    fn hold_status(&self, text: &str) {
+        self.status.set_text(text);
+        self.status_hold_until.set(Some(Instant::now() + STATUS_HOLD));
+    }
+
+    /// True while a held message should not be overwritten by the default hint.
+    fn status_held(&self) -> bool {
+        match self.status_hold_until.get() {
+            Some(until) if Instant::now() < until => true,
+            Some(_) => {
+                self.status_hold_until.set(None);
+                false
+            }
+            None => false,
+        }
+    }
 }
 
 fn dbus_proxy() -> Result<&'static ControlProxyBlocking<'static>, String> {
@@ -242,9 +267,11 @@ fn build_popover(app: &Application) -> Rc<PopoverState> {
 
     let buttons = GtkBox::new(Orientation::Horizontal, 8);
     buttons.set_halign(Align::End);
+    let save_btn = Button::with_label("Save");
     let auto_btn = Button::with_label("Auto");
     let max_btn = Button::with_label("Max");
     let quit_btn = Button::with_label("Quit");
+    buttons.append(&save_btn);
     buttons.append(&auto_btn);
     buttons.append(&max_btn);
     buttons.append(&quit_btn);
@@ -259,8 +286,28 @@ fn build_popover(app: &Application) -> Rc<PopoverState> {
         rows: RefCell::new(HashMap::new()),
         updating: Rc::new(Cell::new(false)),
         suppress_focus_out: Rc::new(Cell::new(false)),
+        status_hold_until: Cell::new(None),
     });
 
+    {
+        let state = Rc::clone(&state);
+        save_btn.connect_clicked(move |_| {
+            info!("Save clicked");
+            let start = Instant::now();
+            match dbus_proxy().and_then(|p| p.save_state().map_err(|e| e.to_string())) {
+                Ok(()) => {
+                    info!("save_state ok in {}ms", start.elapsed().as_millis());
+                    // No refresh: nothing changed in hardware, and refresh would
+                    // immediately overwrite this message with the default hint.
+                    state.hold_status("Saved — these speeds are restored at boot");
+                }
+                Err(e) => {
+                    error!("save_state failed in {}ms: {e}", start.elapsed().as_millis());
+                    state.status.set_text(&format!("Save failed: {e}"));
+                }
+            }
+        });
+    }
     {
         let state = Rc::clone(&state);
         auto_btn.connect_clicked(move |_| {
@@ -529,10 +576,13 @@ fn refresh(state: &PopoverState) {
                 fans.len(),
                 start.elapsed().as_millis()
             );
-            if fans.is_empty() {
-                state.status.set_text("No fans found");
-            } else {
-                state.status.set_text("Drag a slider to set fan speed");
+            // Errors below always win; only the default hints yield to a hold.
+            if !state.status_held() {
+                if fans.is_empty() {
+                    state.status.set_text("No fans found");
+                } else {
+                    state.status.set_text("Drag a slider to set fan speed");
+                }
             }
             apply_fans(state, &fans);
         }

@@ -1,6 +1,7 @@
 package hwmon
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -27,6 +28,10 @@ func ControlModeLabel(enable int) string {
 
 var ErrReadOnlyPWM = fmt.Errorf("PWM controls are read-only; install the ASRock nct6683 DKMS driver (see README)")
 
+// ErrNoEnableFile reports a header without a pwmN_enable control, so firmware
+// automatic mode cannot be selected for it.
+var ErrNoEnableFile = errors.New("pwmN_enable not present")
+
 // PercentToPWM maps 0-100 percent to 0-255 PWM duty cycle.
 func PercentToPWM(percent int) (int, error) {
 	if percent < 0 || percent > 100 {
@@ -51,10 +56,21 @@ func SetPWM(chip *Chip, index int, percent int) error {
 	if err := requireRoot(); err != nil {
 		return err
 	}
-
 	pwmValue, err := PercentToPWM(percent)
 	if err != nil {
 		return err
+	}
+	return SetPWMRaw(chip, index, pwmValue)
+}
+
+// SetPWMRaw sets one fan header to manual mode at a raw 0-255 duty cycle.
+// Restore uses this directly: percent round-trips lose a step (pwm 100 -> 39% -> 99).
+func SetPWMRaw(chip *Chip, index int, pwm int) error {
+	if err := requireRoot(); err != nil {
+		return err
+	}
+	if pwm < 0 || pwm > 255 {
+		return fmt.Errorf("pwm must be 0-255, got %d", pwm)
 	}
 
 	pwmPath := filepath.Join(chip.Path, fmt.Sprintf("pwm%d", index))
@@ -76,8 +92,8 @@ func SetPWM(chip *Chip, index int, percent int) error {
 		}
 	}
 
-	if err := os.WriteFile(pwmPath, []byte(strconv.Itoa(pwmValue)), 0); err != nil {
-		return fmt.Errorf("set pwm%d to %d: %w", index, pwmValue, err)
+	if err := os.WriteFile(pwmPath, []byte(strconv.Itoa(pwm)), 0); err != nil {
+		return fmt.Errorf("set pwm%d to %d: %w", index, pwm, err)
 	}
 	return nil
 }
@@ -115,6 +131,26 @@ func SetMax(chip *Chip) error {
 	return nil
 }
 
+// SetAutoIndex returns one fan header to firmware automatic control.
+// Reports ErrNoEnableFile when pwmN_enable is absent, ErrReadOnlyPWM when it is not writable.
+func SetAutoIndex(chip *Chip, index int) error {
+	if err := requireRoot(); err != nil {
+		return err
+	}
+
+	enablePath := filepath.Join(chip.Path, fmt.Sprintf("pwm%d_enable", index))
+	if _, err := os.Stat(enablePath); err != nil {
+		return ErrNoEnableFile
+	}
+	if !isWritable(enablePath) {
+		return ErrReadOnlyPWM
+	}
+	if err := os.WriteFile(enablePath, []byte(strconv.Itoa(EnableAuto)), 0); err != nil {
+		return fmt.Errorf("set pwm%d auto mode: %w", index, err)
+	}
+	return nil
+}
+
 // SetAuto returns all fans with pwmN_enable to firmware automatic control.
 func SetAuto(chip *Chip) error {
 	if err := requireRoot(); err != nil {
@@ -129,18 +165,17 @@ func SetAuto(chip *Chip) error {
 	var updated int
 	var readOnly int
 	for _, fan := range status.Fans {
-		enablePath := filepath.Join(chip.Path, fmt.Sprintf("pwm%d_enable", fan.Index))
-		if _, err := os.Stat(enablePath); err != nil {
+		err := SetAutoIndex(chip, fan.Index)
+		switch {
+		case err == nil:
+			updated++
+		case errors.Is(err, ErrNoEnableFile):
 			continue
-		}
-		if !isWritable(enablePath) {
+		case errors.Is(err, ErrReadOnlyPWM):
 			readOnly++
-			continue
+		default:
+			return err
 		}
-		if err := os.WriteFile(enablePath, []byte(strconv.Itoa(EnableAuto)), 0); err != nil {
-			return fmt.Errorf("set pwm%d auto mode: %w", fan.Index, err)
-		}
-		updated++
 	}
 
 	if updated == 0 {

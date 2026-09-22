@@ -1,12 +1,21 @@
 [Unit]
 Description=fanctl PWM control daemon
-After=dbus.service
+After=dbus.service systemd-modules-load.service
 Requires=dbus.service
+# The daemon waits for the hwmon chip itself. Without this, five fast failures
+# in 10s would leave the unit permanently failed and also block D-Bus
+# activation, so nothing could restart it. NOTE: this belongs in [Unit] —
+# systemd silently ignores it under [Service].
+StartLimitIntervalSec=0
 
 [Service]
 Type=dbus
 BusName=org.fanctl.Control
 ExecStart=/usr/local/bin/fanctld
+# Creates /var/lib/fanctl (0755 root) for the saved fan profile.
+StateDirectory=fanctl
+# Must exceed the daemon's 60s chip discovery budget.
+TimeoutStartSec=120
 Restart=on-failure
 RestartSec=2
 
